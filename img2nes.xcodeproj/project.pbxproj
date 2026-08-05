@@ -8,14 +8,15 @@
 
 /* Begin PBXBuildFile section */
 		8E1AE96E2B0508AC008FF3C8 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 8E1AE96D2B0508AC008FF3C8 /* main.m */; };
+		8E1AE9762B0508C7008FF3C8 /* Palette.m in Sources */ = {isa = PBXBuildFile; fileRef = 8E1AE9742B0508C7008FF3C8 /* Palette.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
 		8E1AE9682B0508AC008FF3C8 /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = /usr/share/man/man1/;
-			dstSubfolderSpec = 0;
+			dstPath = usr/share/man/man1;
+			dstSubfolderSpec = 7;
 			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 1;
@@ -25,6 +26,9 @@
 /* Begin PBXFileReference section */
 		8E1AE96A2B0508AC008FF3C8 /* img2nes */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = img2nes; sourceTree = BUILT_PRODUCTS_DIR; };
 		8E1AE96D2B0508AC008FF3C8 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
+		8E1AE9742B0508C7008FF3C8 /* Palette.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = Palette.m; sourceTree = "<group>"; };
+		8E1AE9752B0508C7008FF3C8 /* Palette.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = Palette.h; sourceTree = "<group>"; };
+		8E1AE9772B0821B5008FF3C8 /* img.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = img.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -57,6 +61,9 @@
 		8E1AE96C2B0508AC008FF3C8 /* img2nes */ = {
 			isa = PBXGroup;
 			children = (
+				8E1AE9772B0821B5008FF3C8 /* img.h */,
+				8E1AE9752B0508C7008FF3C8 /* Palette.h */,
+				8E1AE9742B0508C7008FF3C8 /* Palette.m */,
 				8E1AE96D2B0508AC008FF3C8 /* main.m */,
 			);
 			path = img2nes;
@@ -120,6 +127,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				8E1AE96E2B0508AC008FF3C8 /* main.m in Sources */,
+				8E1AE9762B0508C7008FF3C8 /* Palette.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -247,6 +255,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = RM3F5X6445;
 				ENABLE_HARDENED_RUNTIME = YES;
+				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
 			name = Debug;
@@ -257,6 +266,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = RM3F5X6445;
 				ENABLE_HARDENED_RUNTIME = YES;
+				MACOSX_DEPLOYMENT_TARGET = 11.0;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
 			name = Release;
