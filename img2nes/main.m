@@ -71,6 +71,8 @@ NSArray* choosePalettes(NSBitmapImageRep *image, int width, int height, NSColor 
 NSArray* bestPaletteForColors(NSDictionary *colors, NSArray *palettes);
 double paletteErrorForColors(NSDictionary *colors, NSArray *palette);
 void printHelp(void);
+static BOOL writeDataTo(NSData *data, NSString *path);
+static BOOL writeTextTo(NSString *text, NSString *path);
 void recordTile(const uint8_t *pattern, int position);
 void assignTiles(uint8_t *nametable);
 
@@ -83,6 +85,32 @@ typedef enum : int {
     PatternOuterCross
 } PatternSelection;
 
+
+// Skriver en fil og siger til hvis det går galt. Før blev returværdien kastet væk overalt,
+// så programmet kunne melde alt vel uden at have skrevet en eneste byte.
+static BOOL writeDataTo(NSData *data, NSString *path)
+{
+    NSError *error = nil;
+
+    if([data writeToFile:path options:NSDataWritingAtomic error:&error])
+        return YES;
+
+    fprintf(stderr, "Error: could not write '%s': %s\n", path.UTF8String,
+            error.localizedDescription.UTF8String);
+    return NO;
+}
+
+static BOOL writeTextTo(NSString *text, NSString *path)
+{
+    NSError *error = nil;
+
+    if([text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error])
+        return YES;
+
+    fprintf(stderr, "Error: could not write '%s': %s\n", path.UTF8String,
+            error.localizedDescription.UTF8String);
+    return NO;
+}
 
 int main(int argc, char * argv[]) {
     @autoreleasepool {
@@ -529,48 +557,67 @@ int main(int argc, char * argv[]) {
         NSData* nmtData = [NSData dataWithBytes:nametable length:960];
         NSData* attrData = [NSData dataWithBytes:attributes length:64];
         
+        BOOL written = YES;
+
         if(!outputBundle)
         {
-			[chrData writeToFile:[outputFile stringByAppendingPathExtension:@"chr"] options:NSDataWritingAtomic error:&err];
-			[nmtData writeToFile:[outputFile stringByAppendingPathExtension:@"nmt"] options:NSDataWritingAtomic error:&err];
+			if(!writeDataTo(chrData, [outputFile stringByAppendingPathExtension:@"chr"])) written = NO;
+			if(!writeDataTo(nmtData, [outputFile stringByAppendingPathExtension:@"nmt"])) written = NO;
 			NSData* palData = convertPalettes(palettes);
-			[palData writeToFile:[outputFile stringByAppendingPathExtension:@"pal"] options:NSDataWritingAtomic error:&err];
+			if(!writeDataTo(palData, [outputFile stringByAppendingPathExtension:@"pal"])) written = NO;
 			NSString *code = asm;
 			
 			
 			if(!compact)
 			{
-				[attrData writeToFile:[outputFile stringByAppendingPathExtension:@"attr"] options:NSDataWritingAtomic error:&err];
+				if(!writeDataTo(attrData, [outputFile stringByAppendingPathExtension:@"attr"])) written = NO;
 				code = [code stringByReplacingOccurrencesOfString:@";;[@]" withString: @".incbin \"[$name].attr\""];
 			}
 			else
 			{
-				NSFileHandle *handle = [NSFileHandle fileHandleForUpdatingAtPath:[outputFile stringByAppendingPathExtension:@"nmt"]];
-				[handle seekToEndOfFile];
-				[handle writeData:attrData];
-				
-				[handle closeFile];
+				NSString *nmtPath = [outputFile stringByAppendingPathExtension:@"nmt"];
+				NSFileHandle *handle = [NSFileHandle fileHandleForUpdatingAtPath:nmtPath];
+
+				// Slog nmt-skrivningen fejl, er handle nil, og attributterne forsvandt tavst
+				if(!handle)
+				{
+					fprintf(stderr, "Error: could not append the attributes to '%s'.\n", nmtPath.UTF8String);
+					written = NO;
+				}
+				else
+				{
+					[handle seekToEndOfFile];
+					[handle writeData:attrData];
+					[handle closeFile];
+				}
+
 				code = [code stringByReplacingOccurrencesOfString:@";;[@]" withString: @""];
 			}
 			
 
 			code = [code stringByReplacingOccurrencesOfString:@"[$name]" withString: outputFile.lastPathComponent];
-			[code writeToFile:[outputFile stringByAppendingPathExtension:@"asm"] atomically:YES encoding: NSUTF8StringEncoding error:&err];
+			if(!writeTextTo(code, [outputFile stringByAppendingPathExtension:@"asm"])) written = NO;
         }
         else
         {
             outputFile = [outputFile stringByAppendingPathExtension:@"nesgfx"];
-            NSError *err;
-            [[NSFileManager defaultManager] createDirectoryAtPath :outputFile withIntermediateDirectories:NO attributes:nil error:&err];
-            
-            if(!err)
+            NSError *dirError = nil;
+
+            // withIntermediateDirectories:NO fejler med "file exists" når bundlet findes i
+            // forvejen. Fejlen blev brugt som betingelse for hele skrivningen nedenfor, så
+            // anden kørsel med samme navn lod det gamle billede blive liggende - uden et ord.
+            // Med YES lykkes kaldet både for en ny og en eksisterende mappe.
+            if([[NSFileManager defaultManager] createDirectoryAtPath:outputFile
+                                         withIntermediateDirectories:YES
+                                                          attributes:nil
+                                                               error:&dirError])
             {
                 NSString* palJson = convertPalettesToJSON(palettes);
-                [palJson writeToFile:[outputFile stringByAppendingPathComponent: @"palette.nespal"] atomically:YES encoding: NSUTF8StringEncoding error:&err];
-                                
-                [nmtData writeToFile:[outputFile stringByAppendingPathComponent:@"nametable.nmt"] options:NSDataWritingAtomic error:&err];
-                [chrData writeToFile:[outputFile stringByAppendingPathComponent:@"tiles.chr"] options:NSDataWritingAtomic error:&err];
-                [attrData writeToFile:[outputFile stringByAppendingPathComponent:@"attributes.attr"] options:NSDataWritingAtomic error:&err];
+                if(!writeTextTo(palJson, [outputFile stringByAppendingPathComponent:@"palette.nespal"])) written = NO;
+
+                if(!writeDataTo(nmtData, [outputFile stringByAppendingPathComponent:@"nametable.nmt"])) written = NO;
+                if(!writeDataTo(chrData, [outputFile stringByAppendingPathComponent:@"tiles.chr"])) written = NO;
+                if(!writeDataTo(attrData, [outputFile stringByAppendingPathComponent:@"attributes.attr"])) written = NO;
 
                 
                 NSDictionary *projectFiles = @{
@@ -579,8 +626,14 @@ int main(int argc, char * argv[]) {
                     @"palette" : @"palette.nespal",
                     @"attributes" : @"attributes.attr"
                 };
-                NSData *projData = [NSJSONSerialization dataWithJSONObject:projectFiles options:NSJSONWritingPrettyPrinted | NSJSONWritingWithoutEscapingSlashes error:&err];
-                [projData writeToFile:[outputFile stringByAppendingPathComponent: @"project.nesproj"] options:NSDataWritingAtomic error:&err ];
+                NSData *projData = [NSJSONSerialization dataWithJSONObject:projectFiles options:NSJSONWritingPrettyPrinted | NSJSONWritingWithoutEscapingSlashes error:&dirError];
+                if(!writeDataTo(projData, [outputFile stringByAppendingPathComponent:@"project.nesproj"])) written = NO;
+            }
+            else
+            {
+                fprintf(stderr, "Error: could not create '%s': %s\n", outputFile.UTF8String,
+                        dirError.localizedDescription.UTF8String);
+                written = NO;
             }
         }
             
@@ -596,6 +649,9 @@ int main(int argc, char * argv[]) {
             }
             printf("\n");
         }
+
+        if(!written)
+            return 1;
     }
     return 0;
 }
