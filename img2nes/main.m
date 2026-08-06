@@ -43,6 +43,15 @@ static int allocatedTiles = FIRST_TILE;
 static NSMutableDictionary<NSData *, NSNumber *> *tileIndexByPattern = nil;
 static int reusedTiles = 0, approximatedTiles = 0;
 
+// Blokkene samles op inden pladserne uddeles. Uddeler man efter først-til-moelle, bruger
+// himlen oeverst i billedet alle 255 tiles, og resten maa noejes med en tilnaermelse. Ved at
+// vente til alle moenstre er kendt kan de hyppigste faa pladserne, og kun de sjaeldne
+// tilnaermes - det er dem det gaar mindst ud over.
+#define MAX_BLOCKS 960
+typedef struct { uint8_t pattern[16]; int position; } TileBlock;
+static TileBlock blocks[MAX_BLOCKS];
+static int blockCount = 0;
+
 float GetDistanceBetweenColor(NSColor* a, NSColor* b);
 NSColor* MatchColor(NSColor* input, NSArray* palette);
 void reduceBlock(NSBitmapImageRep *image, CGRect block, NSArray* palette);
@@ -50,14 +59,10 @@ void ditherBlock(NSBitmapImageRep *sourceImage, CGRect block, NSArray* palette);
 NSColor* getDominantColor(NSDictionary* palette);
 NSArray* getProminentColors(NSDictionary* palette, int max);
 NSArray* getReducedPalette(NSDictionary *palette, int maxColors,  NSColor* _Nullable requiredColor);
-NSArray* getReducedRandomPalette(NSDictionary *palette, int maxColors,  NSColor* _Nullable requiredColor);
 NSDictionary* getUsedColors(NSBitmapImageRep* image, CGRect block);
-NSArray* matchingPalette(NSArray* newPalette, NSArray* existingPalettes);
-NSArray* matchSecondBestPalette(NSArray* newPalette, NSArray* existingPalettes);
 NSData* convertPalettes(NSArray* palettes);
 NSString* convertPalettesToJSON(NSArray* palettes);
 void generateAssemblyFor(NSString * file);
-CGRect determineSquareForPalettes(int maxWidth, int maxHeight, int factor);
 NSArray* importPaletteFrom(NSString *file);
 NSArray *uniqueColorsInPalettes(NSArray *palettes);
 NSBitmapImageRep* normalizedCopyOf(NSBitmapImageRep *source);
@@ -65,8 +70,8 @@ NSArray* choosePalettes(NSBitmapImageRep *image, int width, int height, NSColor 
 NSArray* bestPaletteForColors(NSDictionary *colors, NSArray *palettes);
 double paletteErrorForColors(NSDictionary *colors, NSArray *palette);
 void printHelp(void);
-int indexForTile(const uint8_t *pattern);
-int tileDistance(const uint8_t *a, const uint8_t *b);
+void recordTile(const uint8_t *pattern, int position);
+void assignTiles(uint8_t *nametable);
 
 typedef enum : int {
     PatternDefault,
@@ -94,12 +99,11 @@ int main(int argc, char * argv[]) {
         BOOL center = NO;
         BOOL outputBundle = NO;
 		BOOL compact = YES;
-        PatternSelection paletteSelectionMode = PatternDefault;
         
         int opt;
         opterr = 0;
         //Input, output, verbose, max colors, systempalette, pattern mode, background, preview, dither, center, bundle
-        while ((opt = getopt (argc, argv, "i:o:v:m:s:r:l:g:pdcbxh")) != -1)
+        while ((opt = getopt (argc, argv, "i:o:v:m:s:l:g:pdcbxh")) != -1)
             switch (opt)
         {
             case 'i':           //Input
@@ -139,9 +143,6 @@ int main(int argc, char * argv[]) {
                 return 0;
             case 'c':
                 center = YES;
-                break;
-            case 'r':
-                paletteSelectionMode = (PatternSelection) [[NSString stringWithFormat:@"%s", optarg] intValue];
                 break;
             case 'v':           //Verbose level 0-3
                 verbose_level = atoi(optarg);
@@ -250,8 +251,10 @@ int main(int argc, char * argv[]) {
         // Attributtabellens kvadranter dækker 16x16 pixels. Lander billedet på et ulige antal
         // tiles, ligger dets 16x16-blokke hen over to kvadranter, og så kan paletterne ikke
         // sættes rigtigt uanset hvad. Forskydningen rundes derfor ned til et lige antal tiles.
-        int xOffset = ((int)((256 - width) / 2) / 8) & ~1;
-        int yOffset = ((int)((240 - height) / 2) / 8) & ~1;
+        // Uden centrering ligger billedet i øverste venstre hjørne, og så skal forskydningen
+        // være nul begge steder - både for nametablen og for attributterne.
+        int xOffset = center ? (((int)((256 - width) / 2) / 8) & ~1) : 0;
+        int yOffset = center ? (((int)((240 - height) / 2) / 8) & ~1) : 0;
         int nmt_offset = 0;
         int attr_column = 0;
         int attr_offset = 0;
@@ -422,14 +425,11 @@ int main(int argc, char * argv[]) {
                         pattern[y+8] = lower;
                     }
 
-                    // Ens mønstre deler tile. Er tabellen fuld, bruges den mest lignende -
-                    // før stoppede konverteringen her, så resten af billedet blev væk.
-                    int tileIndex = indexForTile(pattern);
-
                     nmtPosition = nmt_offset + (row/8) * 32 + (column/8);
 
+                    // Selve uddelingen sker først når alle blokke er kendt, se assignTiles.
                     if(nmtPosition >= 0 && nmtPosition < NMT_SIZE)
-                        nametable[nmtPosition] = (uint8_t)tileIndex;
+                        recordTile(pattern, nmtPosition);
 
                     //Calculate next positon, index and offsets
                     column += 8;
@@ -447,6 +447,8 @@ int main(int argc, char * argv[]) {
             }
         }
         
+
+        assignTiles(nametable);
 
         printf("Tiles: %d of %d used, %d blocks reused an existing tile", allocatedTiles - FIRST_TILE, BACKGROUND_TILES - FIRST_TILE, reusedTiles);
         if(approximatedTiles > 0)
@@ -693,71 +695,254 @@ NSArray* choosePalettes(NSBitmapImageRep *image, int width, int height, NSColor 
 
 #pragma mark Tile reuse
 
-// Hvor forskellige to tiles ser ud. Pixelværdierne er paletteindeks 0-3, så en forveksling
-// af 0 og 3 vejer tungere end 0 og 1. Det er groft, men godt nok til at vælge en stand-in.
-int tileDistance(const uint8_t *a, const uint8_t *b)
+
+// Gemmer en blok til senere. Selve tildelingen kan foerst ske naar alle er kendt.
+void recordTile(const uint8_t *pattern, int position)
 {
-    int distance = 0;
+    if(blockCount >= MAX_BLOCKS)
+        return;
 
+    memcpy(blocks[blockCount].pattern, pattern, 16);
+    blocks[blockCount].position = position;
+    blockCount++;
+}
+
+// Pakker mellem NES' to bitplaner og en enkel liste med 64 pixelvaerdier 0-3, som er
+// nemmere at regne gennemsnit paa.
+static void unpackTile(const uint8_t *pattern, uint8_t *pixels)
+{
     for(int y = 0; y < 8; y++)
-    {
-        uint8_t aLow = a[y], aHigh = a[y+8];
-        uint8_t bLow = b[y], bHigh = b[y+8];
-
         for(int x = 0; x < 8; x++)
         {
             int bit = 7 - x;
-            int av = ((aLow >> bit) & 1) | (((aHigh >> bit) & 1) << 1);
-            int bv = ((bLow >> bit) & 1) | (((bHigh >> bit) & 1) << 1);
-            distance += abs(av - bv);
+            pixels[y*8 + x] = ((pattern[y] >> bit) & 1) | (((pattern[y+8] >> bit) & 1) << 1);
         }
-    }
+}
+
+static void packTile(const uint8_t *pixels, uint8_t *pattern)
+{
+    memset(pattern, 0, 16);
+
+    for(int y = 0; y < 8; y++)
+        for(int x = 0; x < 8; x++)
+        {
+            int bit = 7 - x, value = pixels[y*8 + x];
+            pattern[y]   |= (value & 1) << bit;
+            pattern[y+8] |= ((value >> 1) & 1) << bit;
+        }
+}
+
+static int pixelDistance(const uint8_t *a, const uint8_t *b)
+{
+    int distance = 0;
+
+    for(int i = 0; i < 64; i++)
+        distance += abs(a[i] - b[i]);
 
     return distance;
 }
 
-// Giver tile-indekset for et mønster: samme mønster genbruges, nye får plads så længe der er
-// nogen, og når tabellen er fuld vælges den mest lignende i stedet for at opgive billedet.
-int indexForTile(const uint8_t *pattern)
+// Uddeler de 255 tiles og skriver nametablen.
+//
+// Et foto bruger naesten kun moenstre der optraeder en enkelt gang - paa candy.png er 67% af
+// dem unikke, paa portraetter over 90%. Derfor nytter det ikke at uddele pladserne til de
+// hyppigste og lade resten finde det naermeste: opgaven er at vaelge 255 *repraesentanter*
+// blandt de 500-700 moenstre billedet beder om. Det er samme problem som ved paletterne, og
+// loesningen er den samme - Lloyds algoritme, her paa pixelvaerdier i stedet for farver.
+// Afstanden er summen af forskelle, saa den rigtige midte er medianen, ikke gennemsnittet.
+void assignTiles(uint8_t *nametable)
 {
-    if(!tileIndexByPattern)
-        tileIndexByPattern = [[NSMutableDictionary alloc] init];
+    if(blockCount == 0)
+        return;
 
-    NSData *key = [NSData dataWithBytes:pattern length:16];
-    NSNumber *existing = [tileIndexByPattern objectForKey:key];
+    NSMutableDictionary<NSData *, NSNumber *> *counts = [NSMutableDictionary dictionary];
 
-    if(existing)
+    for(int i = 0; i < blockCount; i++)
     {
-        reusedTiles++;
-        return existing.intValue;
+        NSData *key = [NSData dataWithBytes:blocks[i].pattern length:16];
+        counts[key] = @(counts[key].intValue + 1);
     }
 
-    if(allocatedTiles < BACKGROUND_TILES)
+    // Hyppigst foerst. Ved lige mange sammenlignes selve moenstret, saa to koersler paa samme
+    // billede altid giver den samme fil.
+    NSArray<NSData *> *ordered = [counts.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSData *a, NSData *b) {
+        int countA = counts[a].intValue, countB = counts[b].intValue;
+
+        if(countA != countB)
+            return countA > countB ? NSOrderedAscending : NSOrderedDescending;
+
+        int order = memcmp(a.bytes, b.bytes, 16);
+        return order < 0 ? NSOrderedAscending : (order > 0 ? NSOrderedDescending : NSOrderedSame);
+    }];
+
+    int distinctCount = (int)ordered.count;
+    int slots = MIN(distinctCount, BACKGROUND_TILES - FIRST_TILE);
+
+    uint8_t (*pixels)[64] = calloc(distinctCount, 64);
+    uint8_t (*center)[64] = calloc(slots, 64);
+    uint8_t (*best)[64]   = calloc(slots, 64);
+    int *weight = calloc(distinctCount, sizeof(int));
+    int *nearest = calloc(distinctCount, sizeof(int));
+
+    if(!pixels || !center || !best || !weight || !nearest)
     {
-        int index = allocatedTiles++;
-        memcpy(CHR + 4096 + index*16, pattern, 16);
-        [tileIndexByPattern setObject:@(index) forKey:key];
-        return index;
+        free(pixels); free(center); free(best); free(weight); free(nearest);
+        fprintf(stderr, "Out of memory while choosing tiles\n");
+        return;
     }
 
-    int best = FIRST_TILE, bestDistance = INT_MAX;
+    NSMutableDictionary<NSData *, NSNumber *> *rowForPattern = [NSMutableDictionary dictionary];
 
-    for(int i = FIRST_TILE; i < allocatedTiles; i++)
+    for(int i = 0; i < distinctCount; i++)
     {
-        int distance = tileDistance(pattern, CHR + 4096 + i*16);
+        unpackTile(ordered[i].bytes, pixels[i]);
+        weight[i] = counts[ordered[i]].intValue;
+        rowForPattern[ordered[i]] = @(i);
+    }
 
-        if(distance < bestDistance)
+    // Start med de hyppigste og lad dem flytte sig derhen hvor de daekker bedst.
+    for(int c = 0; c < slots; c++)
+        memcpy(center[c], pixels[c], 64);
+
+    long bestError = LONG_MAX;
+
+    for(int pass = 0; pass < 8; pass++)
+    {
+        long error = 0;
+        int worst = 0; long worstDistance = -1;
+
+        for(int i = 0; i < distinctCount; i++)
         {
-            bestDistance = distance;
-            best = i;
+            int pick = 0, pickDistance = INT_MAX;
 
-            if(distance == 0)
-                break;
+            for(int c = 0; c < slots; c++)
+            {
+                int distance = pixelDistance(pixels[i], center[c]);
+
+                if(distance < pickDistance)
+                {
+                    pickDistance = distance;
+                    pick = c;
+
+                    if(distance == 0)
+                        break;
+                }
+            }
+
+            nearest[i] = pick;
+            error += (long)pickDistance * weight[i];
+
+            if((long)pickDistance * weight[i] > worstDistance)
+            {
+                worstDistance = (long)pickDistance * weight[i];
+                worst = i;
+            }
+        }
+
+        if(error < bestError)
+        {
+            bestError = error;
+            memcpy(best, center, (size_t)slots * 64);
+        }
+
+        if(pass == 7 || bestError == 0)
+            break;
+
+        // Ny midte: den vaegtede median af medlemmernes pixelvaerdier.
+        for(int c = 0; c < slots; c++)
+        {
+            int histogram[64][4];
+            memset(histogram, 0, sizeof(histogram));
+            long members = 0;
+
+            for(int i = 0; i < distinctCount; i++)
+            {
+                if(nearest[i] != c)
+                    continue;
+
+                members += weight[i];
+
+                for(int px = 0; px < 64; px++)
+                    histogram[px][pixels[i][px]] += weight[i];
+            }
+
+            if(members == 0)
+            {
+                // Ingen bruger denne plads - giv den til det moenster der passer daarligst.
+                memcpy(center[c], pixels[worst], 64);
+                worstDistance = -1;
+                continue;
+            }
+
+            for(int px = 0; px < 64; px++)
+            {
+                long half = members / 2, running = 0;
+                int value = 3;
+
+                for(int v = 0; v < 4; v++)
+                {
+                    running += histogram[px][v];
+
+                    if(running > half)
+                    {
+                        value = v;
+                        break;
+                    }
+                }
+
+                center[c][px] = (uint8_t)value;
+            }
         }
     }
 
-    approximatedTiles++;
-    return best;
+    // Skriv de valgte tiles og find den endelige plads til hvert moenster.
+    for(int c = 0; c < slots; c++)
+        packTile(best[c], CHR + 4096 + (FIRST_TILE + c)*16);
+
+    allocatedTiles = FIRST_TILE + slots;
+
+    int *tileForPattern = calloc(distinctCount, sizeof(int));
+
+    if(!tileForPattern)
+    {
+        free(pixels); free(center); free(best); free(weight); free(nearest);
+        fprintf(stderr, "Out of memory while choosing tiles\n");
+        return;
+    }
+
+    for(int i = 0; i < distinctCount; i++)
+    {
+        int pick = 0, pickDistance = INT_MAX;
+
+        for(int c = 0; c < slots; c++)
+        {
+            int distance = pixelDistance(pixels[i], best[c]);
+
+            if(distance < pickDistance)
+            {
+                pickDistance = distance;
+                pick = c;
+
+                if(distance == 0)
+                    break;
+            }
+        }
+
+        tileForPattern[i] = FIRST_TILE + pick;
+
+        if(pickDistance == 0)
+            reusedTiles += weight[i] - 1;
+        else
+            approximatedTiles += weight[i];
+    }
+
+    for(int i = 0; i < blockCount; i++)
+    {
+        NSData *key = [NSData dataWithBytes:blocks[i].pattern length:16];
+        nametable[blocks[i].position] = (uint8_t)tileForPattern[rowForPattern[key].intValue];
+    }
+
+    free(pixels); free(center); free(best); free(weight); free(nearest); free(tileForPattern);
 }
 
 #pragma mark Input
@@ -805,8 +990,6 @@ void printHelp(void)
     printf("  -g <$xx>    NES colour to use as background, e.g. -g $0F.\n");
     printf("  -l <file>   Load a 16-byte binary palette instead of choosing one.\n");
     printf("  -s <0-2>    System palette: 0 Mesen, 1 FCEUX, 2 legacy.\n");
-    printf("  -r <0-5>    Where to sample the four palettes from:\n");
-    printf("              0 default, 1 random, 2 inner cross, 3 top-left, 4 corners, 5 outer cross.\n");
     printf("  -b          Write a .nesgfx project bundle instead of separate files.\n");
     printf("  -x          Write attributes as a separate .attr file rather than appending\n");
     printf("              them to the nametable.\n");
@@ -869,39 +1052,6 @@ NSArray* getReducedPalette(NSDictionary *palette, int maxColors,  NSColor* _Null
 //    while(reducedPalette.count < maxColors)
 //        [reducedPalette addObject: [reducedPalette lastObject]];
     
-    return reducedPalette;
-}
-
-NSArray* getReducedRandomPalette(NSDictionary *palette, int maxColors,  NSColor* _Nullable requiredColor)
-{
-    NSMutableArray* reducedPalette = [[NSMutableArray alloc] init];
-            
-    if(palette.allKeys.count > maxColors)
-        [reducedPalette addObjectsFromArray: [palette.allKeys subarrayWithRange:NSMakeRange(0, maxColors)]];
-    else
-        [reducedPalette addObjectsFromArray:palette.allKeys];
-
-    
-    if(requiredColor)
-    {
-        if(![reducedPalette doesContain:requiredColor])
-        {
-            if(reducedPalette.count == maxColors)
-                [reducedPalette removeLastObject];
-            [reducedPalette insertObject: requiredColor atIndex:0];
-        }
-        else if([reducedPalette indexOfObject:requiredColor] != 0)
-        {
-            [reducedPalette removeObject:requiredColor];
-            [reducedPalette insertObject:requiredColor atIndex:0];
-        }
-        
-    }
-	
-	while(reducedPalette.count < 4)
-	{
-		[reducedPalette addObject: [reducedPalette lastObject]]; //Copy last color in order to fill palette
-	}
     return reducedPalette;
 }
 
@@ -1037,60 +1187,6 @@ bool paletteExists(NSArray* newPalette, NSArray* existingPalettes)
     return matches == 4;
 }
 
-NSArray* matchingPalette(NSArray* newPalette, NSArray* existingPalettes)
-{
-    
-    for (NSArray* palette in existingPalettes) {
-        
-        int matches = 0;
-        for(NSColor *newColor in newPalette)
-        {
-            if([palette doesContain:newColor])
-                matches++;
-            if(matches == 4 || matches == newPalette.count)
-                return palette;
-        }
-        
-        if(palette.count < 4 && matches == palette.count)
-        {
-            
-            NSLog(@"Not enough colors in palette. This should never occur!!!");
-            return palette;
-
-        }
-
-    }
-    
-    return nil;
-}
-
-NSArray* matchSecondBestPalette(NSArray* newPalette, NSArray* existingPalettes)
-{
-    
-    int bestMatchSoFar = 0;
-    NSArray *bestMatchedPalette = nil;
-    
-    for (NSArray* palette in existingPalettes) {
-        
-        int matches = 0;
-        for(NSColor *newColor in newPalette)
-        {
-            if([palette doesContain:newColor])
-                matches++;
-        }
-        
-        if(matches > bestMatchSoFar)
-        {
-            bestMatchSoFar = matches;
-            bestMatchedPalette = palette;
-        }
-    }
-    
-    if(DEBUG_LEVEL > 2) printf("Selecting existing palette %lu with %i matches\n", (unsigned long)[existingPalettes indexOfObject:bestMatchedPalette], bestMatchSoFar);
-    
-    return bestMatchedPalette;
-}
-
 
 #pragma mark Color matching
 NSColor* MatchColor(NSColor* input, NSArray* palette)
@@ -1121,98 +1217,6 @@ float GetDistanceBetweenColor(NSColor* a, NSColor* b)
 }
 
 #pragma mark Image analysis
-CGRect determineSquareForPalettes(int maxWidth, int maxHeight, int mode)
-{
-    CGRect square = CGRectMake(0, 0, 16, 16);
-    switch (mode) {
-        //0) Default
-        case 0:
-            square = CGRectMake(0, 0, 16, 16);
-            break;
-        case 1:
-            square = CGRectMake(maxWidth*0.5-8, maxHeight*0.5-8, 16, 16);
-            break;
-        case 2:
-            square = CGRectMake(maxWidth*0.5-8, maxHeight*0.5+8, 16, 16);
-            break;
-        case 3:
-            square = CGRectMake(maxWidth-16, maxHeight-16, 16, 16);
-            break;
-   
-        //1) Random
-        case 4:
-            square = CGRectMake(arc4random_uniform(maxWidth-16), 0, 16, 16);
-            break;
-        case 5:
-            square = CGRectMake(arc4random_uniform(maxWidth-16), maxHeight*0.25, 16, 16);
-            break;
-        case 6:
-            square = CGRectMake(arc4random_uniform(maxWidth-16), maxHeight*0.75, 16, 16);
-            break;
-        case 7:
-            square = CGRectMake(arc4random_uniform(maxWidth-16), maxHeight-16, 16, 16);
-            break;
-        
-        //2) Inner cross
-        case 8:
-            square = CGRectMake(maxWidth*0.5, (maxHeight*0.5)+16, 16, 16);
-            break;
-        case 9:
-            square = CGRectMake((maxWidth*0.5)-16, (maxWidth*0.5), 16, 16);
-            break;
-        case 10:
-            square = CGRectMake((maxWidth*0.5)+16, maxHeight*0.5, 16, 16);
-            break;
-        case 11:
-            square = CGRectMake(maxWidth*0.5, (maxHeight*0.5)+16, 16, 16);
-            break;
-            
-        //3) Top square
-        case 12:
-            square = CGRectMake(0, 0, 16, 16);
-            break;
-        case 13:
-            square = CGRectMake(0, 16, 16, 16);
-            break;
-        case 14:
-            square = CGRectMake(16, 0, 16, 16);
-            break;
-        case 15:
-            square = CGRectMake(16, 16, 16, 16);
-            break;
-        
-        //4) Corners
-        case 16:
-            square = CGRectMake(0, 0, 16, 16);
-            break;
-        case 17:
-            square = CGRectMake(0, maxHeight -16, 16, 16);
-            break;
-        case 18:
-            square = CGRectMake(maxWidth-16, 0, 16, 16);
-            break;
-        case 19:
-            square = CGRectMake(maxWidth-16, maxHeight-16, 16, 16);
-            break;
-        
-        //5) OuterCross
-        case 20:
-            square = CGRectMake((maxWidth-16)*0.5, 0, 16, 16);
-            break;
-        case 21:
-            square = CGRectMake((maxWidth-16)*0.5, maxHeight-16, 16, 16);
-            break;
-        case 22:
-            square = CGRectMake(0, (maxHeight-16)*.5, 16, 16);
-            break;
-        case 23:
-            square = CGRectMake(maxWidth-16, (maxHeight-16)*0.5, 16, 16);
-            break;
-
-    }
-    
-    return square;
-}
 
 #pragma mark Palette import/export
 NSData* convertPalettes(NSArray* palettes)

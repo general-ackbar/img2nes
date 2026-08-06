@@ -61,8 +61,8 @@
       </BuildableProductRunnable>
       <CommandLineArguments>
          <CommandLineArgument
-            argument = "-i /Users/jonatan/Desktop/Test/tmp/card4.png"
-            isEnabled = "NO">
+            argument = "-i /Users/jonatan/Dropbox/Kode/Objective-C/Console/img2nes/img2nes/ar.jpg"
+            isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-p"
@@ -70,11 +70,11 @@
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-c"
-            isEnabled = "YES">
+            isEnabled = "NO">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-m 4"
-            isEnabled = "YES">
+            isEnabled = "NO">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-l /Users/jonatan/Downloads/nes/tst/frame01.pal"
@@ -82,7 +82,7 @@
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-d"
-            isEnabled = "YES">
+            isEnabled = "NO">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-b"
@@ -130,7 +130,7 @@
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-i /Users/jonatan/Library/CloudStorage/Dropbox/Kode/NES/img/HL06.png"
-            isEnabled = "YES">
+            isEnabled = "NO">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-r 2"
