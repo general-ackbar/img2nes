@@ -61,7 +61,7 @@
       </BuildableProductRunnable>
       <CommandLineArguments>
          <CommandLineArgument
-            argument = "-i /Users/jonatan/Dropbox/Kode/Objective-C/Console/img2nes/img2nes/ar.jpg"
+            argument = "-i /Users/jonatan/Library/CloudStorage/Dropbox/Kode/Objective-C/Console/img2nes/img2nes/ar.jpg"
             isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
@@ -69,7 +69,7 @@
             isEnabled = "NO">
          </CommandLineArgument>
          <CommandLineArgument
-            argument = "-c"
+            argument = "-C"
             isEnabled = "NO">
          </CommandLineArgument>
          <CommandLineArgument
@@ -86,7 +86,11 @@
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-b"
-            isEnabled = "NO">
+            isEnabled = "YES">
+         </CommandLineArgument>
+         <CommandLineArgument
+            argument = "-a"
+            isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "-v 1"

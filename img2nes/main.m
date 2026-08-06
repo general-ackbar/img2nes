@@ -128,13 +128,14 @@ int main(int argc, char * argv[]) {
         int verbose_level = 0;
         BOOL center = YES;      // Pænest, og uden ulemper nu hvor attributterne følger med
         BOOL fullscreen = NO;
+        BOOL centeredframe = NO;
         BOOL outputBundle = NO;
 		BOOL compact = YES;
         
         int opt;
         opterr = 0;
         //Input, output, verbose, max colors, systempalette, pattern mode, background, preview, dither, center, bundle
-        while ((opt = getopt (argc, argv, "i:o:v:m:s:l:g:pdctFbxh")) != -1)
+        while ((opt = getopt (argc, argv, "i:o:v:m:s:l:g:pdcCtFbxh")) != -1)
             switch (opt)
         {
             case 'i':           //Input
@@ -182,6 +183,9 @@ int main(int argc, char * argv[]) {
             case 'F':           //Fullscreen: scale to 256x240 and keep the tile count down
                 fullscreen = YES;   // Dither er slået fra i forvejen; sættes den ikke her,
                 break;              // bliver -d -F og -F -d ens.
+            case 'C':
+                centeredframe = YES;
+                break;
             case 'v':           //Verbose level 0-3
                 verbose_level = atoi(optarg);
                 break;
@@ -254,11 +258,18 @@ int main(int argc, char * argv[]) {
         // -F strækker billedet til hele skærmen uanset sideforhold, og skruer samtidig ned
         // for farverne: færre farver giver færre forskellige tiles, og det er netop
         // tilnærmelserne der ødelægger et fuldskærmsbillede.
-        NSBitmapImageRep *inputRep = fullscreen ? scaledCopyOf(sourceRep, 256, 240)
-                                                : normalizedCopyOf(sourceRep);
+        NSBitmapImageRep *inputRep;
+        if (fullscreen)
+            inputRep = scaledCopyOf(sourceRep, 256, 240);
+        else if(centeredframe)
+            inputRep = scaledCopyOf(sourceRep, 128, 128);
+        else
+            inputRep = normalizedCopyOf(sourceRep);
 
         if(fullscreen && !maxColorsGiven)
             maxColors = 4;
+        
+
 
         if(!inputRep)
         {
@@ -1105,6 +1116,7 @@ void printHelp(void)
     printf("  -t          Anchor the image at the top left instead of centring it.\n");
     printf("  -F          Fullscreen: scale the image to 256x240 regardless of its\n");
     printf("              aspect ratio, without dithering and with fewer colours.\n");
+    printf("  -C          Centered:  as -F but resized to 128x128 with full color.\n");
     printf("  -d          Dither instead of picking the closest colour.\n");
     printf("  -m <n>      Maximum number of NES colours to reduce to (default 13).\n");
     printf("  -g <$xx>    NES colour to use as background, e.g. -g $0F.\n");
