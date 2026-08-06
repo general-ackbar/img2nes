@@ -35,6 +35,14 @@
 uint8_t CHR[8192];
 uint8_t nametable[960];
 
+// Baggrundens mønstertabel ligger på $1000 og rummer 256 tiles. Tile 0 holdes blank, så
+// skærmen uden om billedet er ensfarvet - der er altså 255 at gøre godt med til 960 felter.
+#define BACKGROUND_TILES 256
+#define FIRST_TILE 1
+static int allocatedTiles = FIRST_TILE;
+static NSMutableDictionary<NSData *, NSNumber *> *tileIndexByPattern = nil;
+static int reusedTiles = 0, approximatedTiles = 0;
+
 float GetDistanceBetweenColor(NSColor* a, NSColor* b);
 NSColor* MatchColor(NSColor* input, NSArray* palette);
 void reduceBlock(NSBitmapImageRep *image, CGRect block, NSArray* palette);
@@ -54,6 +62,8 @@ NSArray* importPaletteFrom(NSString *file);
 NSArray *uniqueColorsInPalettes(NSArray *palettes);
 NSBitmapImageRep* normalizedCopyOf(NSBitmapImageRep *source);
 void printHelp(void);
+int indexForTile(const uint8_t *pattern);
+int tileDistance(const uint8_t *a, const uint8_t *b);
 
 typedef enum : int {
     PatternDefault,
@@ -337,7 +347,6 @@ int main(int argc, char * argv[]) {
 			}
 		}
         
-        int chrIndex = 4096 + 16; //make sure tile $00 is kept blank as to preserve a neutral background
         int nmtPosition = nmt_offset;
         
         int pc = attr_pos, attrByte = attr_offset;
@@ -408,6 +417,8 @@ int main(int argc, char * argv[]) {
                 //Convert pixel data to chr data
                 for(int i = 0; i<4; i++)
                 {
+                    uint8_t pattern[16];
+
                     for(int y = 0; y < 8; y++)
                     {
                         uint8_t upper = 0;
@@ -418,36 +429,25 @@ int main(int argc, char * argv[]) {
                             NSColor *color = [inputRep colorAtX:column+x y: row+y];
                             color = MatchColor(color, activePalette);
                             long index = [activePalette indexOfObject:color];
-//                            printf("%lu ", index);
-                            
+
                             upper |= ((index & 1) << (7-x));
                             lower |= ((index >> 1) << (7-x));
-                            
-                            
                         }
-  //                      printf("\n");
-//                        printf(BYTE_TO_BINARY_PATTERN" "BYTE_TO_BINARY_PATTERN"\n" , BYTE_TO_BINARY(upper), BYTE_TO_BINARY(lower));
-                        
-                        CHR[chrIndex + y] = upper;
-                        CHR[chrIndex + y + 8] = lower;
+
+                        pattern[y] = upper;
+                        pattern[y+8] = lower;
                     }
 
-                    //Store values
-                    uint8_t tileIndex = ((chrIndex - 4096) / 16);
-                    nmtPosition = nmt_offset + (row/8) * 32 + (column/8);
-                    nametable[nmtPosition] = tileIndex;
-                    
+                    // Ens mønstre deler tile. Er tabellen fuld, bruges den mest lignende -
+                    // før stoppede konverteringen her, så resten af billedet blev væk.
+                    int tileIndex = indexForTile(pattern);
 
+                    nmtPosition = nmt_offset + (row/8) * 32 + (column/8);
+
+                    if(nmtPosition >= 0 && nmtPosition < NMT_SIZE)
+                        nametable[nmtPosition] = (uint8_t)tileIndex;
 
                     //Calculate next positon, index and offsets
-                    chrIndex +=16;
-                    if(chrIndex > 8192)
-                    {
-                        //Dirty dirty hack to break the loop
-                        row = height;
-                        column = width;
-                        break;
-                    }
                     column += 8;
                     if(column % 16 == 0)
                     {
@@ -463,6 +463,11 @@ int main(int argc, char * argv[]) {
             }
         }
         
+
+        printf("Tiles: %d of %d used, %d blocks reused an existing tile", allocatedTiles - FIRST_TILE, BACKGROUND_TILES - FIRST_TILE, reusedTiles);
+        if(approximatedTiles > 0)
+            printf(", %d had to settle for the closest match", approximatedTiles);
+        printf("\n");
 
         printf("Palettes used: %lu\n", (unsigned long)palettes.count);
         while(palettes.count < 4)
@@ -557,6 +562,75 @@ int main(int argc, char * argv[]) {
 }
 
 
+
+#pragma mark Tile reuse
+
+// Hvor forskellige to tiles ser ud. Pixelværdierne er paletteindeks 0-3, så en forveksling
+// af 0 og 3 vejer tungere end 0 og 1. Det er groft, men godt nok til at vælge en stand-in.
+int tileDistance(const uint8_t *a, const uint8_t *b)
+{
+    int distance = 0;
+
+    for(int y = 0; y < 8; y++)
+    {
+        uint8_t aLow = a[y], aHigh = a[y+8];
+        uint8_t bLow = b[y], bHigh = b[y+8];
+
+        for(int x = 0; x < 8; x++)
+        {
+            int bit = 7 - x;
+            int av = ((aLow >> bit) & 1) | (((aHigh >> bit) & 1) << 1);
+            int bv = ((bLow >> bit) & 1) | (((bHigh >> bit) & 1) << 1);
+            distance += abs(av - bv);
+        }
+    }
+
+    return distance;
+}
+
+// Giver tile-indekset for et mønster: samme mønster genbruges, nye får plads så længe der er
+// nogen, og når tabellen er fuld vælges den mest lignende i stedet for at opgive billedet.
+int indexForTile(const uint8_t *pattern)
+{
+    if(!tileIndexByPattern)
+        tileIndexByPattern = [[NSMutableDictionary alloc] init];
+
+    NSData *key = [NSData dataWithBytes:pattern length:16];
+    NSNumber *existing = [tileIndexByPattern objectForKey:key];
+
+    if(existing)
+    {
+        reusedTiles++;
+        return existing.intValue;
+    }
+
+    if(allocatedTiles < BACKGROUND_TILES)
+    {
+        int index = allocatedTiles++;
+        memcpy(CHR + 4096 + index*16, pattern, 16);
+        [tileIndexByPattern setObject:@(index) forKey:key];
+        return index;
+    }
+
+    int best = FIRST_TILE, bestDistance = INT_MAX;
+
+    for(int i = FIRST_TILE; i < allocatedTiles; i++)
+    {
+        int distance = tileDistance(pattern, CHR + 4096 + i*16);
+
+        if(distance < bestDistance)
+        {
+            bestDistance = distance;
+            best = i;
+
+            if(distance == 0)
+                break;
+        }
+    }
+
+    approximatedTiles++;
+    return best;
+}
 
 #pragma mark Input
 
