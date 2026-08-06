@@ -61,6 +61,9 @@ CGRect determineSquareForPalettes(int maxWidth, int maxHeight, int factor);
 NSArray* importPaletteFrom(NSString *file);
 NSArray *uniqueColorsInPalettes(NSArray *palettes);
 NSBitmapImageRep* normalizedCopyOf(NSBitmapImageRep *source);
+NSArray* choosePalettes(NSBitmapImageRep *image, int width, int height, NSColor *background);
+NSArray* bestPaletteForColors(NSDictionary *colors, NSArray *palettes);
+double paletteErrorForColors(NSDictionary *colors, NSArray *palette);
 void printHelp(void);
 int indexForTile(const uint8_t *pattern);
 int tileDistance(const uint8_t *a, const uint8_t *b);
@@ -326,26 +329,7 @@ int main(int argc, char * argv[]) {
                 
 
 		if(!palettes)
-		{
-			palettes = [[NSMutableArray alloc] init];
-			
-			
-			//Init 4 palettes taken from random positions in the image
-			for (int i = 0; i < 4; i++) {
-				CGRect square = determineSquareForPalettes(width, height, paletteSelectionMode*4+i);
-				
-				NSDictionary *activeColors = getUsedColors(inputRep, square );
-				NSArray *prominentColors = getReducedRandomPalette(activeColors, 4, dominantColor);
-				while(prominentColors.count < 4 && maxColors > 4)
-				{
-					NSLog(@"Couldn't find enough colors for palette %i. Trying to find more colors", i);
-					square = determineSquareForPalettes(width, height, PatternRandom);
-					activeColors = getUsedColors(inputRep, square);
-					prominentColors = getReducedRandomPalette(activeColors, 4, dominantColor);
-				}
-				[palettes addObject:prominentColors];
-			}
-		}
+			palettes = (NSMutableArray *) choosePalettes(inputRep, width, height, dominantColor);
         
         int nmtPosition = nmt_offset;
         
@@ -361,10 +345,10 @@ int main(int argc, char * argv[]) {
                 CGRect activeSquare = CGRectMake(column, row, 16, 16);
                 NSDictionary *activeColors = getUsedColors(inputRep, activeSquare );
                 
-                NSArray *prominentColors = getReducedRandomPalette(activeColors, 4, dominantColor);
-                NSArray *activePalette = matchingPalette(prominentColors, palettes);
-                if(!activePalette)
-                    activePalette = matchSecondBestPalette(prominentColors, palettes);
+                // Vælg den palette der giver mindst samlet afvigelse for blokkens pixels.
+                // Før blev der talt hvor mange farver der var ens, hvilket ikke tager højde
+                // for hvor stor en del af blokken hver farve fylder.
+                NSArray *activePalette = bestPaletteForColors(activeColors, palettes);
                 
                 reduceBlock(inputRep, activeSquare, activePalette);
 
@@ -562,6 +546,150 @@ int main(int argc, char * argv[]) {
 }
 
 
+
+#pragma mark Palette selection
+
+// Hvor dårligt en palette dækker en blok: hver farve vejer med hvor mange pixels den fylder,
+// og koster afstanden til den nærmeste farve paletten faktisk har.
+double paletteErrorForColors(NSDictionary *colors, NSArray *palette)
+{
+    double error = 0;
+
+    for (NSColor *color in colors)
+    {
+        int count = [[colors objectForKey:color] intValue];
+        float best = FLT_MAX;
+
+        for (NSColor *candidate in palette)
+        {
+            float distance = GetDistanceBetweenColor(color, candidate);
+            if(distance < best)
+                best = distance;
+        }
+
+        error += sqrt(best) * count;
+    }
+
+    return error;
+}
+
+NSArray* bestPaletteForColors(NSDictionary *colors, NSArray *palettes)
+{
+    NSArray *best = [palettes firstObject];
+    double bestError = DBL_MAX;
+
+    for (NSArray *palette in palettes)
+    {
+        double error = paletteErrorForColors(colors, palette);
+
+        if(error < bestError)
+        {
+            bestError = error;
+            best = palette;
+        }
+    }
+
+    return best;
+}
+
+// De tre hyppigste farver i en optælling, bortset fra baggrunden
+static NSArray* topColorsExcluding(NSDictionary *colors, NSColor *background, int wanted)
+{
+    NSMutableArray *candidates = [[colors allKeys] mutableCopy];
+    [candidates removeObject:background];
+
+    [candidates sortUsingComparator:^NSComparisonResult(NSColor *a, NSColor *b) {
+        return [[colors objectForKey:b] compare:[colors objectForKey:a]];
+    }];
+
+    if(candidates.count > wanted)
+        [candidates removeObjectsInRange:NSMakeRange(wanted, candidates.count - wanted)];
+
+    return candidates;
+}
+
+// Vælger de fire paletter ud fra hele billedet i stedet for fire tilfældige felter.
+// Først et bud ud fra de hyppigste farvekombinationer, derefter et par gennemløb hvor hver
+// blok tildeles den palette der passer bedst, og hver palette tilpasses sine egne blokke.
+NSArray* choosePalettes(NSBitmapImageRep *image, int width, int height, NSColor *background)
+{
+    NSMutableArray *blocks = [[NSMutableArray alloc] init];
+
+    for(int row = 0; row + 16 <= height; row += 16)
+        for(int column = 0; column + 16 <= width; column += 16)
+            [blocks addObject: getUsedColors(image, CGRectMake(column, row, 16, 16))];
+
+    if(blocks.count == 0)
+        return nil;
+
+    // Første bud: de hyppigst forekommende trefarve-kombinationer blandt blokkene
+    NSCountedSet *combinations = [[NSCountedSet alloc] init];
+    for (NSDictionary *block in blocks)
+    {
+        NSArray *top = topColorsExcluding(block, background, 3);
+        if(top.count > 0)
+            [combinations addObject:top];
+    }
+
+    NSArray *ranked = [[combinations allObjects] sortedArrayUsingComparator:^NSComparisonResult(id a, id b) {
+        return [@([combinations countForObject:b]) compare:@([combinations countForObject:a])];
+    }];
+
+    NSMutableArray *palettes = [[NSMutableArray alloc] init];
+    for (NSArray *combination in ranked)
+    {
+        if(palettes.count == 4)
+            break;
+
+        NSMutableArray *palette = [[NSMutableArray alloc] initWithObjects:background, nil];
+        [palette addObjectsFromArray:combination];
+
+        while(palette.count < 4)
+            [palette addObject: [palette lastObject]];
+
+        [palettes addObject:palette];
+    }
+
+    while(palettes.count < 4)
+        [palettes addObject: [palettes lastObject] ?: @[background, background, background, background]];
+
+    // Forbedr dem: tildel blokke, tilpas paletter, gentag
+    for(int pass = 0; pass < 4; pass++)
+    {
+        NSMutableArray *assigned = [[NSMutableArray alloc] init];
+        for(int i = 0; i < 4; i++)
+            [assigned addObject: [[NSMutableDictionary alloc] init]];
+
+        for (NSDictionary *block in blocks)
+        {
+            NSArray *palette = bestPaletteForColors(block, palettes);
+            NSMutableDictionary *bucket = [assigned objectAtIndex: [palettes indexOfObject:palette]];
+
+            for (NSColor *color in block)
+            {
+                NSNumber *count = [bucket objectForKey:color];
+                [bucket setObject:@([count intValue] + [[block objectForKey:color] intValue]) forKey:color];
+            }
+        }
+
+        for(int i = 0; i < 4; i++)
+        {
+            NSDictionary *bucket = [assigned objectAtIndex:i];
+            if(bucket.count == 0)
+                continue;
+
+            NSMutableArray *palette = [[NSMutableArray alloc] initWithObjects:background, nil];
+            [palette addObjectsFromArray: topColorsExcluding(bucket, background, 3)];
+
+            while(palette.count < 4)
+                [palette addObject: [palette lastObject]];
+
+            [palettes replaceObjectAtIndex:i withObject:palette];
+        }
+    }
+
+    return palettes;
+}
 
 #pragma mark Tile reuse
 
