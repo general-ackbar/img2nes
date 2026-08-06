@@ -52,6 +52,8 @@ void generateAssemblyFor(NSString * file);
 CGRect determineSquareForPalettes(int maxWidth, int maxHeight, int factor);
 NSArray* importPaletteFrom(NSString *file);
 NSArray *uniqueColorsInPalettes(NSArray *palettes);
+NSBitmapImageRep* normalizedCopyOf(NSBitmapImageRep *source);
+void printHelp(void);
 
 typedef enum : int {
     PatternDefault,
@@ -84,7 +86,7 @@ int main(int argc, char * argv[]) {
         int opt;
         opterr = 0;
         //Input, output, verbose, max colors, systempalette, pattern mode, background, preview, dither, center, bundle
-        while ((opt = getopt (argc, argv, "i:o:v:m:s:r:l:g:pdcbx")) != -1)
+        while ((opt = getopt (argc, argv, "i:o:v:m:s:r:l:g:pdcbxh")) != -1)
             switch (opt)
         {
             case 'i':           //Input
@@ -120,7 +122,7 @@ int main(int argc, char * argv[]) {
                 outputBundle = YES;
                 break;
             case 'h':           //Help
-                //printHelp();
+                printHelp();
                 return 0;
             case 'c':
                 center = YES;
@@ -187,28 +189,56 @@ int main(int argc, char * argv[]) {
 
         NSData *inputData = [NSData dataWithContentsOfFile:inputFile];
         NSImage *inputImage = [[NSImage alloc] initWithData:inputData];
-        NSBitmapImageRep *inputRep =  [NSBitmapImageRep imageRepWithData:[inputImage TIFFRepresentation]];
+        NSBitmapImageRep *sourceRep = [NSBitmapImageRep imageRepWithData:[inputImage TIFFRepresentation]];
+
+        if(!sourceRep)
+        {
+            printf("Error: '%s' could not be read as an image.\n", inputFile.UTF8String);
+            return 1;
+        }
+
+        // Gråtone-, indekserede og 16-bit billeder kan ikke læses med colorAtX:y: og
+        // redComponent - de kaster. Billedet tegnes derfor om til et kendt RGB-format.
+        NSBitmapImageRep *inputRep = normalizedCopyOf(sourceRep);
+
+        if(!inputRep)
+        {
+            printf("Error: the image format of '%s' is not supported.\n", inputFile.UTF8String);
+            return 1;
+        }
 
         if(inputRep.pixelsWide > 256)
         {
             printf("Input width larger than 256\n");
             return 1;
-        } else if(inputRep.pixelsWide * inputRep.pixelsHigh > 8*16*8*16)
-        {
-            printf("The output will be truncated as an input with a width of %f can only be %f height. \n", inputRep.size.width, (8*16*8*16)/inputRep.size.width );
-            
         }
-        
+
+        if(inputRep.pixelsHigh > 240)
+        {
+            printf("Input height larger than 240\n");
+            return 1;
+        }
+
         if((int)inputRep.pixelsWide % 8 != 0)
         {
             printf("Input width must be divisible with 8\n");
             return 1;
         }
+
+        if((int)inputRep.pixelsHigh % 8 != 0)
+        {
+            // Uden det her læses der pixels neden for billedet i den nederste blok
+            printf("Input height must be divisible with 8\n");
+            return 1;
+        }
         
         int width = (int)inputRep.pixelsWide;
         int height = (int)inputRep.pixelsHigh;
-        int xOffset = (int)((256. - width) / 2.)/8.;
-        int yOffset = (int)((240. - height) / 2.)/8.;
+        // Attributtabellens kvadranter dækker 16x16 pixels. Lander billedet på et ulige antal
+        // tiles, ligger dets 16x16-blokke hen over to kvadranter, og så kan paletterne ikke
+        // sættes rigtigt uanset hvad. Forskydningen rundes derfor ned til et lige antal tiles.
+        int xOffset = ((int)((256 - width) / 2) / 8) & ~1;
+        int yOffset = ((int)((240 - height) / 2) / 8) & ~1;
         int nmt_offset = 0;
         int attr_column = 0;
         int attr_offset = 0;
@@ -246,7 +276,19 @@ int main(int argc, char * argv[]) {
 				
         NSColor *dominantColor = getDominantColor(allColors);
         if(bgColor)
-            dominantColor = [[Palette sharedPalette] getColorFromName:@"$00"];
+        {
+            // Brugte før altid $00 uanset hvad der stod efter -g
+            NSString *name = [bgColor hasPrefix:@"$"] ? bgColor.uppercaseString : [@"$" stringByAppendingString:bgColor.uppercaseString];
+            NSColor *chosen = [[Palette sharedPalette] getColorFromName:name];
+
+            if(!chosen)
+            {
+                printf("Error: '%s' is not a NES color. Use a name like $0F.\n", bgColor.UTF8String);
+                return 1;
+            }
+
+            dominantColor = chosen;
+        }
         printf("%s is the dominant color and therefor candidate as background\n", [[[Palette sharedPalette] getNameFromColor:dominantColor] cStringUsingEncoding:NSUTF8StringEncoding]);
 		
 		
@@ -254,6 +296,10 @@ int main(int argc, char * argv[]) {
 		NSMutableArray *palettes;
 		if(paletteFile) {
 			palettes = (NSMutableArray*) importPaletteFrom(paletteFile);
+
+			if(!palettes)
+				return 1;
+
 			dominantColor = [[palettes firstObject] firstObject];
 			selectedColors = uniqueColorsInPalettes(palettes);
 			printf("Custom palette contains %lu unique colors\n", (unsigned long)selectedColors.count );
@@ -318,8 +364,20 @@ int main(int argc, char * argv[]) {
                 int nmtRow = (nmtPosition / 64);
 
                 int paletteIndex = (int)[palettes indexOfObject:activePalette];
-                attributes[attrByte] |= (paletteIndex << pc*2);
-                pc++;
+
+                // Samme formel som hardwaren bruger: én byte per 32x32 pixels, fire kvadranter
+                // à 16x16 i hver. Før blev attrByte og pc bogført undervejs og kom ud af trit
+                // så snart billedet ikke lå i skærmens øverste venstre hjørne.
+                {
+                    int nx = xOffset + column/8;
+                    int ny = yOffset + row/8;
+
+                    if(nx < 32 && ny < 30)
+                    {
+                        int quadrant = ((ny % 4) / 2) * 2 + ((nx % 4) / 2);
+                        attributes[(ny/4)*8 + (nx/4)] |= (paletteIndex << (quadrant*2));
+                    }
+                }
                 
 
                 if(column + 16 >= width) //(column == 0 & row > 0)
@@ -500,6 +558,61 @@ int main(int argc, char * argv[]) {
 
 
 
+#pragma mark Input
+
+// Tegner et vilkårligt bitmap om til 8-bit RGB, så colorAtX:y: og redComponent altid er lovlige
+NSBitmapImageRep* normalizedCopyOf(NSBitmapImageRep *source)
+{
+    NSInteger width = source.pixelsWide;
+    NSInteger height = source.pixelsHigh;
+
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
+                                                                    pixelsWide:width
+                                                                    pixelsHigh:height
+                                                                 bitsPerSample:8
+                                                               samplesPerPixel:4
+                                                                      hasAlpha:YES
+                                                                      isPlanar:NO
+                                                                colorSpaceName:NSCalibratedRGBColorSpace
+                                                                   bytesPerRow:0
+                                                                  bitsPerPixel:0];
+    if(!rep)
+        return nil;
+
+    NSGraphicsContext *context = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+    if(!context)
+        return nil;
+
+    [NSGraphicsContext saveGraphicsState];
+    [NSGraphicsContext setCurrentContext:context];
+    [source drawInRect:NSMakeRect(0, 0, width, height)];
+    [NSGraphicsContext restoreGraphicsState];
+
+    return rep;
+}
+
+void printHelp(void)
+{
+    printf("img2nes - convert an image to NES background graphics\n\n");
+    printf("Usage: img2nes -i <file> [options]\n\n");
+    printf("  -i <file>   Input image. Max 256x240, both sides divisible by 8.\n");
+    printf("  -o <name>   Output name without extension. Defaults to the input name.\n");
+    printf("  -c          Centre the image on the screen.\n");
+    printf("  -d          Dither instead of picking the closest colour.\n");
+    printf("  -m <n>      Maximum number of NES colours to reduce to (default 13).\n");
+    printf("  -g <$xx>    NES colour to use as background, e.g. -g $0F.\n");
+    printf("  -l <file>   Load a 16-byte binary palette instead of choosing one.\n");
+    printf("  -s <0-2>    System palette: 0 Mesen, 1 FCEUX, 2 legacy.\n");
+    printf("  -r <0-5>    Where to sample the four palettes from:\n");
+    printf("              0 default, 1 random, 2 inner cross, 3 top-left, 4 corners, 5 outer cross.\n");
+    printf("  -b          Write a .nesgfx project bundle instead of separate files.\n");
+    printf("  -x          Write attributes as a separate .attr file rather than appending\n");
+    printf("              them to the nametable.\n");
+    printf("  -p          Also write a PNG preview of the reduced image.\n");
+    printf("  -v <0-3>    Verbosity. 2 or higher prints the attribute table.\n");
+    printf("  -h          This help.\n");
+}
+
 #pragma mark Assembly file export
 void generateAssemblyFor(NSString *file)
 {
@@ -659,33 +772,48 @@ void ditherBlock(NSBitmapImageRep *sourceImage, CGRect block, NSArray* palette)
              3 5 1
              */
             
+            // Fejlen spredes til naboer der kan ligge uden for billedet
+            int maxX = (int)sourceImage.pixelsWide - 1;
+            int maxY = (int)sourceImage.pixelsHigh - 1;
+
             NSColor *nextColor;
             int coefficient;
             //field to the immidiate right
+            if(x+1 <= maxX)
+            {
             nextColor = [sourceImage colorAtX:x+1 y:y];
             coefficient = 7;
             
             NSColor *adjustedColor = [NSColor colorWithCalibratedRed:CLAMP( nextColor.redComponent + rError * coefficient, 0, 1) green:CLAMP( nextColor.greenComponent + gError * coefficient, 0, 1) blue:CLAMP( nextColor.blueComponent + bError * coefficient, 0, 1) alpha:1.0 ];
             [sourceImage setColor:adjustedColor atX:x+1 y:y];
-            
+            }
+
             //field to the left & down
+            if(x-1 >= 0 && y+1 <= maxY)
+            {
             nextColor =  [sourceImage colorAtX:x-1 y:y+1];
             coefficient = 3;
-            adjustedColor = [NSColor colorWithCalibratedRed:CLAMP( nextColor.redComponent + rError * coefficient, 0, 1) green:CLAMP( nextColor.greenComponent + gError * coefficient, 0, 1) blue:CLAMP( nextColor.blueComponent + bError * coefficient, 0, 1) alpha:1.0 ];
-            [sourceImage setColor:adjustedColor atX:x-1 y:y+1];
-            
+            NSColor *adjusted = [NSColor colorWithCalibratedRed:CLAMP( nextColor.redComponent + rError * coefficient, 0, 1) green:CLAMP( nextColor.greenComponent + gError * coefficient, 0, 1) blue:CLAMP( nextColor.blueComponent + bError * coefficient, 0, 1) alpha:1.0 ];
+            [sourceImage setColor:adjusted atX:x-1 y:y+1];
+            }
+
             //field to the imidiate down
+            if(y+1 <= maxY)
+            {
             nextColor = [sourceImage colorAtX:x y:y+1];
             coefficient = 5;
-            adjustedColor = [NSColor colorWithCalibratedRed:CLAMP( nextColor.redComponent + rError * coefficient, 0, 1) green:CLAMP( nextColor.greenComponent + gError * coefficient, 0, 1) blue:CLAMP( nextColor.blueComponent + bError * coefficient, 0, 1) alpha:1.0 ];
-            [sourceImage setColor:adjustedColor atX:x y:y+1];
-            
+            NSColor *adjusted = [NSColor colorWithCalibratedRed:CLAMP( nextColor.redComponent + rError * coefficient, 0, 1) green:CLAMP( nextColor.greenComponent + gError * coefficient, 0, 1) blue:CLAMP( nextColor.blueComponent + bError * coefficient, 0, 1) alpha:1.0 ];
+            [sourceImage setColor:adjusted atX:x y:y+1];
+            }
+
             //field to the right & down
+            if(x+1 <= maxX && y+1 <= maxY)
+            {
             nextColor = [sourceImage colorAtX:x+1 y:y+1];
             coefficient = 1;
-            adjustedColor = [NSColor colorWithCalibratedRed:CLAMP( nextColor.redComponent + rError * coefficient, 0, 1) green:CLAMP( nextColor.greenComponent + gError * coefficient, 0, 1) blue:CLAMP( nextColor.blueComponent + bError * coefficient, 0, 1) alpha:1.0 ];
-                
-            [sourceImage setColor:adjustedColor atX:x+1 y:y+1];
+            NSColor *adjusted = [NSColor colorWithCalibratedRed:CLAMP( nextColor.redComponent + rError * coefficient, 0, 1) green:CLAMP( nextColor.greenComponent + gError * coefficient, 0, 1) blue:CLAMP( nextColor.blueComponent + bError * coefficient, 0, 1) alpha:1.0 ];
+            [sourceImage setColor:adjusted atX:x+1 y:y+1];
+            }
         }
     }
 }
@@ -895,7 +1023,9 @@ NSData* convertPalettes(NSArray* palettes)
         }
     }
     
-	[paletteData appendData: paletteData];
+	// Paletten skrives to gange: NES'ens palette-RAM er 32 bytes, hvor de sidste 16 er
+	// sprite-paletter. At føje en NSMutableData til sig selv er ikke defineret, så der kopieres.
+	[paletteData appendData: [paletteData copy]];
 	return paletteData;
 }
 
@@ -921,6 +1051,15 @@ NSString* convertPalettesToJSON(NSArray* palettes)
 NSArray* importPaletteFrom(NSString *file)
 {
 	NSData *paletteData = [NSData dataWithContentsOfFile:file];
+
+	// Kastede før på både for korte og tomme filer, og igen når et opdigtet farvenavn
+	// gav nil ind i array-literalen nedenfor.
+	if(paletteData.length < 16)
+	{
+		printf("Error: '%s' is not a palette. A binary palette is 16 bytes.\n", file.UTF8String);
+		return nil;
+	}
+
 	NSMutableArray *palettes = [[NSMutableArray alloc] init];
 	for (int i = 0; i < 4; i++) {
 		uint8_t hexPalette[4];
@@ -936,6 +1075,12 @@ NSArray* importPaletteFrom(NSString *file)
 		NSColor *c2 = [[Palette sharedPalette] getColorFromName:s2];
 		NSColor *c3 = [[Palette sharedPalette] getColorFromName:s3];
 		
+		if(!c0 || !c1 || !c2 || !c3)
+		{
+			printf("Error: '%s' contains a value that is not a NES color.\n", file.UTF8String);
+			return nil;
+		}
+
 		NSArray *palette = @[c0, c1, c2, c3];
 /*
 		NSArray *palette = @[
