@@ -1,0 +1,6 @@
+{
+  "attributes" : "attributes.attr",
+  "chrrom" : "tiles.chr",
+  "nametable" : "nametable.nmt",
+  "palette" : "palette.nespal"
+}

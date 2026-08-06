@@ -66,6 +66,7 @@ void generateAssemblyFor(NSString * file);
 NSArray* importPaletteFrom(NSString *file);
 NSArray *uniqueColorsInPalettes(NSArray *palettes);
 NSBitmapImageRep* normalizedCopyOf(NSBitmapImageRep *source);
+NSBitmapImageRep* scaledCopyOf(NSBitmapImageRep *source, NSInteger width, NSInteger height);
 NSArray* choosePalettes(NSBitmapImageRep *image, int width, int height, NSColor *background);
 NSArray* bestPaletteForColors(NSDictionary *colors, NSArray *palettes);
 double paletteErrorForColors(NSDictionary *colors, NSArray *palette);
@@ -95,15 +96,17 @@ int main(int argc, char * argv[]) {
         BOOL createPreview = NO;
         BOOL printAttributes = NO;
         int maxColors = 13;
+        BOOL maxColorsGiven = NO;
         int verbose_level = 0;
-        BOOL center = NO;
+        BOOL center = YES;      // Pænest, og uden ulemper nu hvor attributterne følger med
+        BOOL fullscreen = NO;
         BOOL outputBundle = NO;
 		BOOL compact = YES;
         
         int opt;
         opterr = 0;
         //Input, output, verbose, max colors, systempalette, pattern mode, background, preview, dither, center, bundle
-        while ((opt = getopt (argc, argv, "i:o:v:m:s:l:g:pdcbxh")) != -1)
+        while ((opt = getopt (argc, argv, "i:o:v:m:s:l:g:pdctFbxh")) != -1)
             switch (opt)
         {
             case 'i':           //Input
@@ -121,6 +124,7 @@ int main(int argc, char * argv[]) {
 				break;
             case 'm':           //Max colors
                 maxColors = [[NSString stringWithFormat:@"%s", optarg] intValue];
+                maxColorsGiven = YES;
                 break;
             case 'p':           //Output readable formats for palette and preview
                 createPreview = YES;
@@ -141,9 +145,15 @@ int main(int argc, char * argv[]) {
             case 'h':           //Help
                 printHelp();
                 return 0;
-            case 'c':
-                center = YES;
+            case 'c':           // Centrering er nu standard. Flaget beholdes så ældre
+                center = YES;       // kommandolinjer stadig virker.
                 break;
+            case 't':           //Anchor at the top left instead of centring
+                center = NO;
+                break;
+            case 'F':           //Fullscreen: scale to 256x240 and keep the tile count down
+                fullscreen = YES;   // Dither er slået fra i forvejen; sættes den ikke her,
+                break;              // bliver -d -F og -F -d ens.
             case 'v':           //Verbose level 0-3
                 verbose_level = atoi(optarg);
                 break;
@@ -213,7 +223,14 @@ int main(int argc, char * argv[]) {
 
         // Gråtone-, indekserede og 16-bit billeder kan ikke læses med colorAtX:y: og
         // redComponent - de kaster. Billedet tegnes derfor om til et kendt RGB-format.
-        NSBitmapImageRep *inputRep = normalizedCopyOf(sourceRep);
+        // -F strækker billedet til hele skærmen uanset sideforhold, og skruer samtidig ned
+        // for farverne: færre farver giver færre forskellige tiles, og det er netop
+        // tilnærmelserne der ødelægger et fuldskærmsbillede.
+        NSBitmapImageRep *inputRep = fullscreen ? scaledCopyOf(sourceRep, 256, 240)
+                                                : normalizedCopyOf(sourceRep);
+
+        if(fullscreen && !maxColorsGiven)
+            maxColors = 4;
 
         if(!inputRep)
         {
@@ -454,6 +471,42 @@ int main(int argc, char * argv[]) {
         if(approximatedTiles > 0)
             printf(", %d had to settle for the closest match", approximatedTiles);
         printf("\n");
+
+        // Over en tredjedel tilnærmede blokke ses tydeligt. Målt: ar.jpg 0%, cb.jpg 11% (fin),
+        // candy.png 56% (den Jonatan er mindst tilfreds med).
+        if(blockCount > 0 && approximatedTiles * 100 / blockCount > 30)
+        {
+            fflush(stdout);     // ellers står advarslen før den linje den handler om
+            fprintf(stderr, "Warning: due to high variation in the required tiles, the result "
+                            "might not be satisfactory (%d%% of the blocks had to settle for "
+                            "the closest match).\n", approximatedTiles * 100 / blockCount);
+
+            // Kun de råd der faktisk kan følges. Under -F er farverne allerede skruet ned,
+            // og "gør billedet mindre" modsiger hele pointen med flaget.
+            BOOL advised = NO;
+
+            if(dither)
+            {
+                fprintf(stderr, "         Try again without -d.\n");
+                advised = YES;
+            }
+
+            if(maxColors > 6)
+            {
+                fprintf(stderr, "         Lower the colour count with -m (for example -m 6).\n");
+                advised = YES;
+            }
+
+            if(!fullscreen)
+            {
+                fprintf(stderr, "         A smaller image leaves fewer tiles to approximate.\n");
+                advised = YES;
+            }
+
+            if(!advised)
+                fprintf(stderr, "         This image asks for more distinct tiles than the NES "
+                                "can hold; there is no setting that fixes it.\n");
+        }
 
         printf("Palettes used: %lu\n", (unsigned long)palettes.count);
         while(palettes.count < 4)
@@ -950,8 +1003,15 @@ void assignTiles(uint8_t *nametable)
 // Tegner et vilkårligt bitmap om til 8-bit RGB, så colorAtX:y: og redComponent altid er lovlige
 NSBitmapImageRep* normalizedCopyOf(NSBitmapImageRep *source)
 {
-    NSInteger width = source.pixelsWide;
-    NSInteger height = source.pixelsHigh;
+    return scaledCopyOf(source, source.pixelsWide, source.pixelsHigh);
+}
+
+// Samme omtegning, men til en valgt størrelse. Sideforholdet bevares bevidst ikke - et
+// fotos rammer betyder mindre end at fylde skærmen ud.
+NSBitmapImageRep* scaledCopyOf(NSBitmapImageRep *source, NSInteger width, NSInteger height)
+{
+    if(width < 1 || height < 1)
+        return nil;
 
     NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
                                                                     pixelsWide:width
@@ -972,6 +1032,7 @@ NSBitmapImageRep* normalizedCopyOf(NSBitmapImageRep *source)
 
     [NSGraphicsContext saveGraphicsState];
     [NSGraphicsContext setCurrentContext:context];
+    context.imageInterpolation = NSImageInterpolationHigh;
     [source drawInRect:NSMakeRect(0, 0, width, height)];
     [NSGraphicsContext restoreGraphicsState];
 
@@ -982,9 +1043,12 @@ void printHelp(void)
 {
     printf("img2nes - convert an image to NES background graphics\n\n");
     printf("Usage: img2nes -i <file> [options]\n\n");
-    printf("  -i <file>   Input image. Max 256x240, both sides divisible by 8.\n");
+    printf("  -i <file>   Input image. Max 256x240, both sides divisible by 8 (see -F).\n");
+    printf("              The image is centred on the screen; use -t to anchor it top left.\n");
     printf("  -o <name>   Output name without extension. Defaults to the input name.\n");
-    printf("  -c          Centre the image on the screen.\n");
+    printf("  -t          Anchor the image at the top left instead of centring it.\n");
+    printf("  -F          Fullscreen: scale the image to 256x240 regardless of its\n");
+    printf("              aspect ratio, without dithering and with fewer colours.\n");
     printf("  -d          Dither instead of picking the closest colour.\n");
     printf("  -m <n>      Maximum number of NES colours to reduce to (default 13).\n");
     printf("  -g <$xx>    NES colour to use as background, e.g. -g $0F.\n");
